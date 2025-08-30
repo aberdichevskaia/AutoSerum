@@ -1,1 +1,11 @@
 *.wet
+data/auxidx/
+data/aux/
+runs/
+*.bin
+*.uint32
+*.uint64
+*.sqlite
+*.mmap
+__pycache__/
+.ipynb_checkpoints/

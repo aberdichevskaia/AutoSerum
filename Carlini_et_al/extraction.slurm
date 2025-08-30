@@ -14,4 +14,5 @@
 source /home/iscb/wolfson/annab4/miniconda3/etc/profile.d/conda.sh
 conda activate carlini
 
-python /home/iscb/wolfson/annab4/AutoSerum/Carlini_et_al/extraction.py --N 1000 --batch-size 10
+#python /home/iscb/wolfson/annab4/AutoSerum/Carlini_et_al/extraction.py --N 1000 --batch-size 10
+python3 /home/iscb/wolfson/annab4/AutoSerum/Carlini_et_al/extraction.py --N 1000 --internet-sampling --wet-file /home/iscb/wolfson/annab4/AutoSerum/Carlini_et_al/commoncrawl.warc.wet
