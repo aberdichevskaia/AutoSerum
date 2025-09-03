@@ -18,15 +18,17 @@ conda activate carlini
 export HF_HOME=/home/iscb/wolfson/annab4/.cache/huggingface
 export AUXIDX_DIR=/home/iscb/wolfson/annab4/autoserum/auxidx
 
-
+# random prefix
+#TODO pathes are not pretty 
 python /home/iscb/wolfson/annab4/AutoSerum/src/sample_gpt2.py \
   --N 1000 \
   --batch-size 1 \
   --seq-len 256 \
   --top-k 40 \
   --verify \
-  --auxidx "$AUXIDX_DIR" \
+  --auxidx "$AUXIDX_DIR" \ 
   --window 32 \
+  --suffix-ids 128,42,17,199 \ 
   --ppl-thr 15 \
   --score-thr 1.0 \
   --membership-thr 1.3 \

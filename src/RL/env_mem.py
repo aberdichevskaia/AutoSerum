@@ -7,8 +7,9 @@ def lm_last_hidden_for_prefix(prefix_text: str,
                               lm: PreTrainedModel,
                               device: torch.device) -> torch.Tensor:
     ids = tok.encode(prefix_text, add_special_tokens=False, return_tensors="pt").to(device)
+    attn = torch.ones_like(ids)
     with torch.no_grad():
-        out = lm(input_ids=ids, output_hidden_states=True, use_cache=False)
+        out = lm(input_ids=ids, attention_mask=attn, output_hidden_states=True, use_cache=False)
         h_last = out.hidden_states[-1][0, -1, :].detach()
     return h_last
 
@@ -23,8 +24,11 @@ def generate_text(prompt_ids: torch.Tensor,
                   lm: PreTrainedModel,
                   device: torch.device,
                   max_new_tokens: int = 120) -> str:
+    inp = prompt_ids.unsqueeze(0).to(device)
+    attn = torch.ones_like(inp)
     out = lm.generate(
-        input_ids=prompt_ids.unsqueeze(0).to(device),
+        input_ids=inp,
+        attention_mask=attn,
         do_sample=True, temperature=0.9, top_p=0.95,
         max_new_tokens=max_new_tokens,
         pad_token_id=tok.eos_token_id,
