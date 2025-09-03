@@ -26,9 +26,9 @@ python /home/iscb/wolfson/annab4/AutoSerum/src/sample_gpt2.py \
   --seq-len 256 \
   --top-k 40 \
   --verify \
-  --auxidx "$AUXIDX_DIR" \ 
+  --auxidx "$AUXIDX_DIR" \
   --window 32 \
-  --suffix-ids 128,42,17,199 \ 
+  --suffix-file "/home/iscb/wolfson/annab4/slurm_outputs/runs/memrl/best_suffix.json" \
   --ppl-thr 15 \
   --score-thr 1.0 \
   --membership-thr 1.3 \

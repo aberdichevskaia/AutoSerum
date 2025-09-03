@@ -4,11 +4,11 @@ import numpy as np
 
 # Local imports
 FILE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = FILE_DIR
+ROOT_DIR = "/home/iscb/wolfson/annab4/AutoSerum/src" #FILE_DIR
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from src.verify_memorization import Ngram8Index, prepare_tokenizer
+from verify_memorization import Ngram8Index, prepare_tokenizer
 
 def load_jsonl(path: str) -> List[dict]:
     recs = []

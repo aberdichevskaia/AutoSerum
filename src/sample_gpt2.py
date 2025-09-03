@@ -27,7 +27,7 @@ def build_batch_with_suffix(prompts, suffix_ids, tokenizer, pad_id):
     seqs = []
     for p in prompts:
         base = tokenizer.encode(p, add_special_tokens=False)
-        full = base + list(suffix_ids)  # >>> suffix participates in context
+        full = base + list(suffix_ids)  # suffix participates in context
         seqs.append(full)
 
     maxlen = max(len(s) for s in seqs) if seqs else 1
@@ -73,7 +73,7 @@ def main():
     print(f"[GEN] device: {device}", flush=True)
     cache_dir = "/home/iscb/wolfson/annab4/.cache/huggingface/transformers"
 
-    tokenizer = prepare_tokenizer()  # must set pad_token=eos and padding_side='left' inside
+    tokenizer = prepare_tokenizer()  # sets pad_token=eos and padding_side='left'
     PAD_ID = tokenizer.pad_token_id
 
     model1 = GPT2LMHeadModel.from_pretrained(
@@ -106,7 +106,7 @@ def main():
     f_all = open(os.path.join(run_dir, "samples.jsonl"), "w", encoding="utf-8")
     f_flag = open(os.path.join(run_dir, "flagged.jsonl"), "w", encoding="utf-8") if args.verify else None
 
-    # >>> load suffix once
+    # load suffix once
     suffix_ids = []
     if args.suffix_file:
         with open(args.suffix_file, "r", encoding="utf-8") as f:
@@ -120,11 +120,14 @@ def main():
     tick_idx = 1
     done = 0
 
+    # window sizes to report (always include the primary --window)
+    WIN_SET = sorted({8, 16, 32, int(args.window)})
+
     while done < total:
         bs = min(args.batch_size, total - done)
         prompts = ["<|endoftext|>"] * bs  # base prompt
 
-        # >>> build inputs with suffix included in the context
+        # build inputs with suffix included in the context
         input_ids, attention_mask, ctx_len = build_batch_with_suffix(
             prompts, suffix_ids, tokenizer, PAD_ID
         )
@@ -136,12 +139,12 @@ def main():
             out = model1.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_length=ctx_len + args.seq_len,  # >>> total = context + new tokens
+                max_length=ctx_len + args.seq_len,  # total = context + new tokens
                 do_sample=True, top_k=args.top_k, top_p=1.0,
                 pad_token_id=PAD_ID,
             )
 
-        # >>> for each item: slice off the context and score ONLY the generated continuation
+        # for each item: slice off the context and score ONLY the generated continuation
         for b in range(bs):
             seq = out[b]
             # context length for this example = number of 1s in attention mask row
@@ -152,9 +155,37 @@ def main():
             # Metrics on the generated continuation only
             p1 = calculate_perplexity(gen_text, model1, tokenizer)  # XL PPL
             p2 = calculate_perplexity(gen_text, model2, tokenizer)  # small PPL
-            ids = tokenizer.encode(gen_text, add_special_tokens=False)  # >>> NO suffix here
+            ids = tokenizer.encode(gen_text, add_special_tokens=False)  # NO suffix here
             z_bytes = len(zlib.compress(gen_text.encode("utf-8")))
             score = membership_score(p1, z_bytes, len(ids))  # using imported score
+
+            # Default hits stats (if no verification)
+            hits_total = 0
+            hits_by_window = {}
+
+            # White-box verification (index on AUX)
+            is_mem = False
+            if args.verify and index is not None and len(ids) >= min(WIN_SET):
+                # AUX shift (+1), skip windows that include 0 (doc boundary)
+                ids_p1 = np.asarray([t + 1 for t in ids], dtype=np.uint32)
+
+                # Count matches for multiple window sizes
+                for k in WIN_SET:
+                    if len(ids_p1) < k:
+                        continue
+                    cnt_k = 0
+                    for j in range(0, len(ids_p1) - k + 1):
+                        win = ids_p1[j:j + k]
+                        if 0 in win:
+                            continue
+                        if index.contains_window(win, k=k):
+                            cnt_k += 1
+                    hits_by_window[str(k)] = int(cnt_k)
+
+                # Primary window stats / decision
+                hits_total = int(hits_by_window.get(str(int(args.window)), 0))
+                if hits_total > 0 and ((p1 <= args.ppl_thr) or (score <= args.score_thr)):
+                    is_mem = True
 
             rec = {
                 "text": gen_text,
@@ -164,21 +195,10 @@ def main():
                 "ntok": int(len(ids)),
                 "score": float(score),
                 "suffix_ids": suffix_ids,  # for traceability
+                "hits_total": int(hits_total),
+                "hits_by_window": hits_by_window,  # e.g., {"8": n8, "16": n16, ...}
             }
             f_all.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-            # White-box verification (index on AUX)
-            is_mem = False
-            if args.verify and len(ids) >= args.window:
-                ids_p1 = np.asarray([t + 1 for t in ids], dtype=np.uint32)  # AUX shift (+1)
-                for j in range(0, len(ids_p1) - args.window + 1):
-                    win = ids_p1[j:j + args.window]
-                    if 0 in win:
-                        continue
-                    if index.contains_window(win, k=args.window):
-                        if (p1 <= args.ppl_thr) or (score <= args.score_thr):
-                            is_mem = True
-                        break
 
             if is_mem and f_flag is not None:
                 f_flag.write(json.dumps(rec, ensure_ascii=False) + "\n")

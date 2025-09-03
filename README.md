@@ -51,10 +51,19 @@ AutoSerum/
 Example:
 
 ```bash
-conda create -n carlini python=3.12 -y
-conda activate carlini
-pip install torch --index-url https://download.pytorch.org/whl/cu124    # choose the correct CUDA build
-pip install transformers==4.55.4 datasets==2.21.0 zstandard numpy tqdm
+conda create -n auto_serum python=3.12 --override-channels -c conda-forge -c defaults -y
+conda activate auto_serum
+
+# for generation 
+pip install --upgrade pip setuptools wheel
+pip install --index-url https://download.pytorch.org/whl/cu124 # choose the correct CUDA 
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 
+pip install transformers==4.55.4 tqdm==4.67.1 numpy==2.0.2 tokenizers==0.21.4 huggingface_hub==0.34.4 safetensors==0.6.2
+
+# for dataset building
+pip install --no-cache-dir "datasets==2.21.0"
+pip install --no-cache-dir zstandard
+pip install --no-cache-dir "fsspec[http]==2024.6.1" "aiohttp>=3.8,<4"
 ```
 
 ### 2) Hugging Face cache & (optional) token
@@ -193,7 +202,7 @@ Compare `flagged.jsonl` counts and aggregates in `samples.jsonl`.
 
 set -euo pipefail
 source /path/to/miniconda3/etc/profile.d/conda.sh
-conda activate carlini
+conda activate auto_serum
 
 export HF_HOME=/path/to/.cache/huggingface
 export AUXIDX_DIR=/path/to/autoserum/auxidx
@@ -259,11 +268,12 @@ python /path/to/AutoSerum/src/sample_gpt2.py \
 
 ---
 
-## Citations (background)
+## Citations (background) TODO fix citations format
 
 * Carlini et al., “Extracting Training Data from Large Language Models” (USENIX Security ’21).
 * “Scalable Extraction of Training Data from (Production) Language Models.”
-* SlimPajama / RedPajama / The Pile / RefinedWeb / Dolma corpora.
+* RLPROMPT: Optimizing Discrete Text Prompts with Reinforcement Learning.
+* SlimPajama dataset.
 
 ---
 

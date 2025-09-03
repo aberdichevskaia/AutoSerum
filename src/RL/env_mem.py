@@ -6,16 +6,32 @@ def lm_last_hidden_for_prefix(prefix_text: str,
                               tok: PreTrainedTokenizer,
                               lm: PreTrainedModel,
                               device: torch.device) -> torch.Tensor:
-    ids = tok.encode(prefix_text, add_special_tokens=False, return_tensors="pt").to(device)
+    # Encode and build explicit attention mask
+    ids = tok.encode(prefix_text, add_special_tokens=False, return_tensors="pt")
+    if ids.numel() == 0:
+        # Fallback: avoid empty input to LM
+        ids = torch.tensor([[tok.eos_token_id]], dtype=torch.long)
     attn = torch.ones_like(ids)
+    ids = ids.to(device)
+    attn = attn.to(device)
+
     with torch.no_grad():
-        out = lm(input_ids=ids, attention_mask=attn, output_hidden_states=True, use_cache=False)
-        h_last = out.hidden_states[-1][0, -1, :].detach()
+        out = lm(input_ids=ids,
+                 attention_mask=attn,
+                 output_hidden_states=True,
+                 use_cache=False)
+        h_last = out.hidden_states[-1][0, -1, :]  # [H]
+
+    # Ensure clean finite float32 tensor before policy head
+    h_last = h_last.detach().to(dtype=torch.float32)
+    h_last = torch.nan_to_num(h_last, nan=0.0, posinf=1e4, neginf=-1e4).contiguous()
     return h_last
 
 def build_prompt_ids(prefix_text: str, suffix_token_ids: List[int],
                      tok: PreTrainedTokenizer) -> torch.Tensor:
     ids = tok.encode(prefix_text, add_special_tokens=False) + suffix_token_ids
+    if len(ids) == 0:
+        ids = [tok.eos_token_id]
     return torch.tensor(ids, dtype=torch.long)
 
 @torch.no_grad()
@@ -42,7 +58,7 @@ def repetition_tail(prefix: str, tail_chars: int = 12, repeat: int = 3) -> str:
 
 def sample_slice_from_text(corpus: str, slice_len_chars: int, gt_len_chars: int) -> Tuple[str, str]:
     max_r = max(0, len(corpus) - (slice_len_chars + gt_len_chars) - 1)
-    r = random.randint(0, max_r)
+    r = random.randint(0, max_r) if max_r > 0 else 0
     s = corpus[r: r + slice_len_chars]
     gt = corpus[r + slice_len_chars: r + slice_len_chars + gt_len_chars]
     return s, gt
