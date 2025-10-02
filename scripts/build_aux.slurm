@@ -14,9 +14,10 @@ source /home/iscb/wolfson/annab4/miniconda3/etc/profile.d/conda.sh
 conda activate auto_serum
 
 python /home/iscb/wolfson/annab4/AutoSerum/src/datasets_building/build_aux_tokens.py \
-  --out /home/iscb/wolfson/annab4/autoserum/auxidx \
+  #--out /home/iscb/wolfson/annab4/autoserum/auxidx \
+  --out /home/iscb/wolfson/annab4/autoserum/auxidx_big \
   --dataset cerebras/SlimPajama-627B \
-  --max_tokens 50_000_000 \
-  --progress_steps 10
+  --max_tokens 2_000_000_000 \
+  --progress_steps 20
 
 

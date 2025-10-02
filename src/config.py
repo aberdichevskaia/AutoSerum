@@ -1,9 +1,9 @@
 # --- Paths ---
 PATHS = {
     "hf_home": "/home/iscb/wolfson/annab4/.cache/huggingface",
-    "auxidx_dir": "/home/iscb/wolfson/annab4/autoserum/auxidx",   # tokens.uint32, doc_offsets.uint64, ng8.sqlite
-    "runs_dir": "/home/iscb/wolfson/annab4/AutoSerum/runs", 
-    "corpus": "/home/iscb/wolfson/annab4/AutoSerum/data/slices.txt"
+    "auxidx_dir": "/home/iscb/wolfson/annab4/AutoSerum/auxidx",  
+    "runs_dir": "/home/iscb/wolfson/annab4/AutoSerum/runs",
+    "corpus": "/home/iscb/wolfson/annab4/AutoSerum/data/slices.txt",
 }
 
 # --- Build AUX defaults ---
@@ -26,6 +26,7 @@ TRAIN = {
     "device": "cuda",
     "task_lm": "gpt2",
     "policy_lm": "gpt2",
+    "ref_lm": "gpt2",  
     "k_tokens": 4,
     "cand_vocab_size": 256,
     "max_new_tokens": 120,
@@ -57,15 +58,15 @@ GEN = {
     "batch_size": 1,
     "seq_len": 256,
     "top_k": 40,
+    "top_p": 1.0,
     "verify": True,
-    "aux_window": 50,
+    "window": 50,         
     "membership_thr": 1.3,
     "ppl_thr": 25.0,
     "score_thr": 1.0,
+    "progress_steps": 10,
     "out_subdir": "gen",
     "main_lm": "gpt2-xl",
     "ref_lm": "gpt2",
-    "top_p": 1.0,
     "prompt": "<|endoftext|>",
-    "progress_steps": 10,
 }

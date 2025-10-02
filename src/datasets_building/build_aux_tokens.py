@@ -4,6 +4,11 @@ import numpy as np
 from datasets import load_dataset
 from transformers import GPT2TokenizerFast
 
+import sys
+SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
 from config import PATHS, BUILD_AUX
 
 
@@ -17,7 +22,6 @@ def main():
     args = ap.parse_args()
     
     # apply config defaults
-    os.environ["HF_HOME"] = PATHS["hf_home"]
     out_dir = args.out or PATHS["auxidx_dir"]
     dataset = args.dataset or BUILD_AUX["dataset"]
     split = args.split or BUILD_AUX["split"]
