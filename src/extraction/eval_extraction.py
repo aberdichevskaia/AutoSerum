@@ -2,13 +2,14 @@ import os, sys, json, argparse, hashlib, statistics, math
 from typing import Dict, List, Tuple
 import numpy as np
 
-# Local imports
-FILE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = "/home/iscb/wolfson/annab4/AutoSerum/src" #FILE_DIR
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+# resolving local pathes
+from pathlib import Path
+import sys
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # AutoSerum/
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from verify_memorization import Ngram8Index, prepare_tokenizer
+from src.extraction.verify_memorization import Ngram8Index, prepare_tokenizer
 
 def load_jsonl(path: str) -> List[dict]:
     recs = []

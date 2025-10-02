@@ -11,14 +11,9 @@
 #SBATCH --mail-user=annab4@mail.tau.ac.il   
 
 source /home/iscb/wolfson/annab4/miniconda3/etc/profile.d/conda.sh
-conda activate carlini
+conda activate auto_serum
 
-#export HF_TOKEN=hf_xxxxxx
-export HF_HOME=/home/iscb/wolfson/annab4/.cache/huggingface
-export AUXIDX_DIR=/home/iscb/wolfson/annab4/autoserum/auxidx
-
-
-python /home/iscb/wolfson/annab4/AutoSerum/scripts/build_aux_tokens.py \
+python /home/iscb/wolfson/annab4/AutoSerum/src/datasets_building/build_aux_tokens.py \
   --out /home/iscb/wolfson/annab4/autoserum/auxidx \
   --dataset cerebras/SlimPajama-627B \
   --max_tokens 50_000_000 \

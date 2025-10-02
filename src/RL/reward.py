@@ -1,16 +1,18 @@
 # src/rl/reward.py
-import os, sys
-FILE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(FILE_DIR)  # parent directory that contains verify_memorization.py
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
 
 import math, zlib, numpy as np
 from typing import Dict, List, Optional
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from verify_memorization import Ngram8Index
+# resolving local pathes
+from pathlib import Path
+import sys
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # AutoSerum/
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+    
+from src.extraction.verify_memorization import Ngram8Index
 
 # -------------------------------
 # Utilities

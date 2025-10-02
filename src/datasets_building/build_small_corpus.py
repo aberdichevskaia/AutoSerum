@@ -1,10 +1,14 @@
 from datasets import load_dataset
 import os
 
-out = "/home/iscb/wolfson/annab4/AutoSerum/data/slices.txt"
+from config import PATHS, BUILD_AUX
+
+out = PATHS["corpus"]
 os.makedirs(os.path.dirname(out), exist_ok=True)
 
-ds = load_dataset("cerebras/SlimPajama-627B", split="train", streaming=True)
+dataset = BUILD_AUX["dataset"]
+split = BUILD_AUX["split"]
+ds = load_dataset(dataset, split=split, streaming=True)
 
 n = 1000
 with open(out, "w", encoding="utf-8") as f:

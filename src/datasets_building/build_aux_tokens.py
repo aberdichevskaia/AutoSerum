@@ -4,6 +4,8 @@ import numpy as np
 from datasets import load_dataset
 from transformers import GPT2TokenizerFast
 
+from config import PATHS, BUILD_AUX
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -13,18 +15,26 @@ def main():
     ap.add_argument("--max_tokens", type=int, default=50_000_000, help="Stop after this many tokens (+sentinels)")
     ap.add_argument("--progress_steps", type=int, default=10, help="How many progress ticks to print")
     args = ap.parse_args()
+    
+    # apply config defaults
+    os.environ["HF_HOME"] = PATHS["hf_home"]
+    out_dir = args.out or PATHS["auxidx_dir"]
+    dataset = args.dataset or BUILD_AUX["dataset"]
+    split = args.split or BUILD_AUX["split"]
+    max_tokens = args.max_tokens or BUILD_AUX["max_tokens"]
+    progress_steps = args.progress_steps or BUILD_AUX["progress_steps"]
 
-    os.makedirs(args.out, exist_ok=True)
-    tok_path = os.path.join(args.out, "tokens.uint32")
-    off_path = os.path.join(args.out, "doc_offsets.uint64")
+    os.makedirs(out_dir, exist_ok=True)
+    tok_path = os.path.join(out_dir, "tokens.uint32")
+    off_path = os.path.join(out_dir, "doc_offsets.uint64")
 
     tok = GPT2TokenizerFast.from_pretrained("gpt2")
     tok.pad_token = tok.eos_token
     tok.padding_side = "left"
 
     ds = load_dataset(
-        args.dataset,
-        split=args.split,
+        dataset,
+        split=split,
         streaming=True,
         trust_remote_code=True, 
     )
@@ -32,12 +42,12 @@ def main():
 
     total = 0
     offsets = [0]
-    goal = max(args.max_tokens, 1)
-    step_quota = max(goal // args.progress_steps, 1)
+    goal = max(max_tokens, 1)
+    step_quota = max(goal // progress_steps, 1)
     next_tick = step_quota
     tick_idx = 1
 
-    print(f"[AUX] start: max_tokens={args.max_tokens}, dataset={args.dataset}", flush=True)
+    print(f"[AUX] start: max_tokens={max_tokens}, dataset={dataset}", flush=True)
     with open(tok_path, "wb") as f:
         for ex in ds:
             text = ex.get("text") or ""
@@ -50,13 +60,13 @@ def main():
             total += arr.size
             offsets.append(total)
 
-            if total >= next_tick and tick_idx <= args.progress_steps:
+            if total >= next_tick and tick_idx <= progress_steps:
                 pct = int(100 * min(total, goal) / goal)
-                print(f"[AUX] progress {tick_idx}/{args.progress_steps} (~{pct}%) — {total} tokens", flush=True)
+                print(f"[AUX] progress {tick_idx}/{progress_steps} (~{pct}%) — {total} tokens", flush=True)
                 tick_idx += 1
                 next_tick += step_quota
 
-            if total >= args.max_tokens:
+            if total >= max_tokens:
                 break
 
     np.asarray(offsets, dtype=np.uint64).tofile(off_path)
