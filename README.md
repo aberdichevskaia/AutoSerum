@@ -1,12 +1,12 @@
-# AutoSerum — Minimal pipeline for memorization extraction from GPT-2
+# AutoSerum — Minimal pipeline for memorization extraction from LLMs
 
-AutoSerum is a small, modular project for **discovering memorized text** in autoregressive language models (starting with GPT-2 and GPT-2-XL). It includes:
+AutoSerum is a small, modular project for **discovering memorized text** in autoregressive LMs (starting with GPT-2 / GPT-2-XL). It includes:
 
-* A **toy AUX dataset** builder (from public web corpora) and an **n-gram index** for fast white-box substring lookups.
-* A **generation + filtering** script that samples from a model, ranks candidates by a heuristic “membership score”, and (optionally) **verifies** them via the index.
-* A lightweight **RL loop** that learns **prompt suffixes** which increase the odds of extracting memorized continuations.
+* An **AUX dataset builder** (from public web corpora) and an **n-gram index** for fast white-box substring checks.
+* A **generation + filtering** step that samples from a model, scores candidates with a heuristic **membership score**, and optionally **verifies** them via the index.
+* A lightweight **RL loop** that learns **prompt suffixes** to increase the odds of extracting memorized continuations.
 
-This repo is intentionally student-project scale: you can run end-to-end on a single GPU + a few GB of AUX data, then scale up later if useful.
+The repo is intentionally student-scale: you can run end-to-end on a single GPU plus a few GB of AUX data, then scale up if useful.
 
 ---
 
@@ -15,28 +15,30 @@ This repo is intentionally student-project scale: you can run end-to-end on a si
 ```
 AutoSerum/
 ├─ README.md
-├─ scripts/
-│  ├─ build_aux_tokens.py
-│  ├─ build_ngram8_index.py
-│  ├─ build_small_corpus.py
+├─ data/
+├─ runs/
 ├─ src/
-│  ├─ sample_gpt2.py
-│  ├─ verify_memorization.py
+│  ├─ config.py                     # single source of truth: paths & defaults
+│  ├─ _bootstrap.py                 # optional: stable imports when running files directly
+│  ├─ datasets_building/
+│  │  ├─ build_aux_tokens.py        # stream → tokenize (GPT-2) → tokens.uint32, doc_offsets.uint64
+│  │  └─ build_ngram8_index.py      # build n=8 SQLite index over token windows
+│  ├─ extraction/
+│  │  ├─ sample_gpt2.py             # generation + scoring + (opt.) verification
+│  │  └─ verify_memorization.py     # Ngram8Index, membership_score, tokenizer helper
 │  └─ RL/
-│     ├─ train_mem_prompt.py
+│     ├─ train_mem_prompt.py        # RL to learn a K-token suffix
 │     ├─ policy.py
 │     ├─ env_mem.py
 │     └─ reward.py
-├─ data/
-├─ runs/
-└─ slurm/
+└─ slurm/ (optional)
 ```
+
+> If you don’t use `python -m`, keep `_bootstrap.py` and add the small header shown in **Running** to make imports stable.
 
 ---
 
-## Quick start
-
-### 1) Environment (tested)
+## Environment
 
 * Python ≥ 3.10 (tested with 3.12)
 * CUDA GPU recommended (≥12 GB for `gpt2-xl`; 24 GB is comfortable)
@@ -48,7 +50,7 @@ AutoSerum/
   * `zstandard`
   * `numpy`, `tqdm`
 
-Example:
+Example (adjust CUDA wheel channel/version as needed):
 
 ```bash
 conda create -n auto_serum python=3.12 --override-channels -c conda-forge -c defaults -y
@@ -56,7 +58,7 @@ conda activate auto_serum
 
 # for generation 
 pip install --upgrade pip setuptools wheel
-pip install --index-url https://download.pytorch.org/whl/cu124 # choose the correct CUDA 
+pip install --index-url https://download.pytorch.org/whl/cu124 # adjust CUDA as needed  
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 
 pip install transformers==4.55.4 tqdm==4.67.1 numpy==2.0.2 tokenizers==0.21.4 huggingface_hub==0.34.4 safetensors==0.6.2
 
@@ -66,128 +68,146 @@ pip install --no-cache-dir zstandard
 pip install --no-cache-dir "fsspec[http]==2024.6.1" "aiohttp>=3.8,<4"
 ```
 
-### 2) Hugging Face cache & (optional) token
+---
+
+## Configuration (single source of truth)
+
+All defaults live in `src/config.py`:
+
+* `PATHS`: `hf_home`, `auxidx_dir`, `runs_dir`, `corpus`
+* `BUILD_AUX`: dataset, split, `max_tokens`, `progress_steps`
+* `INDEX`: `ngram`, `downsample`, `progress_steps`
+* `TRAIN`: RL/training parameters (models, K, batch, iters, etc.)
+* `GEN`: generation/verification parameters (e.g., `main_lm`, `ref_lm`, `prompt`, `top_k`, `top_p`, `out_subdir`, thresholds)
+
+You can override **any** of these via CLI flags at run time.
+Hugging Face cache is passed as `cache_dir=PATHS["hf_home"]`.
+
+Optionally, if you need gated repos, run:
+```bash
+# export HF_TOKEN=hf_********************************  
+```
+---
+
+## Building the AUX dataset + index
+
+### 1) Tokens
+
+Default (uses `PATHS` / `BUILD_AUX`):
 
 ```bash
-export HF_HOME=/path/to/.cache/huggingface
-# export HF_TOKEN=hf_********************************   # if you need gated repos
+python -u src/datasets_building/build_aux_tokens.py
 ```
 
-### 3) Build a small AUX dataset + index
-
-Tokenize a small subset (e.g., SlimPajama), writing a flat token file:
+Optional overrides:
 
 ```bash
-python scripts/build_aux_tokens.py \
+python -u -m src.datasets_building.build_aux_tokens \
+  --out /path/to/auxidx \
   --dataset cerebras/SlimPajama-627B \
-  --split train \
-  --max-docs 20000 \
-  --outdir /path/to/autoserum/auxidx
-# → /path/to/autoserum/auxidx/tokens.uint32
+  --max_tokens 10000000
 ```
 
-Build an **n-gram (n=8) SQLite** index:
+Outputs:
+
+* `auxidx/tokens.uint32`
+* `auxidx/doc_offsets.uint64`
+
+### 2) N-gram (n=8) index
 
 ```bash
-python scripts/build_ngram8_index.py \
-  --tokens /path/to/autoserum/auxidx/tokens.uint32 \
-  --out /path/to/autoserum/auxidx/ng8.sqlite
+python -u src/datasets_building/build_ngram8_index.py
 ```
 
-Set an env var for convenience:
+Output:
 
-```bash
-export AUXIDX_DIR=/path/to/autoserum/auxidx
-```
-
-> The paper’s full pipeline uses \~9 TB and weeks of compute. Start tiny to validate; later increase `--max-docs`.
+* `auxidx/ng8.sqlite`
 
 ---
 
 ## Generation + (optional) verification
 
-### What it does
+What it does:
 
-* Samples from **GPT-2-XL** (or your model), optionally with a **prompt suffix**, and computes:
+* Samples with **GEN.main_lm** (default `gpt2-xl`), optional **suffix**.
+* Computes PPL under main and ref models, zlib size, membership score.
+* If `verify=True`, slides a token window and checks presence in the AUX index.
 
-  * **Perplexity** under XL and small GPT-2,
-  * **Zlib byte length**,
-  * A **membership score** (heuristic).
-* If `--verify` is set, slides a **window** over output tokens and checks whether any window appears in the **AUX n-gram index**.
-
-### Run
+Default run (everything from `config.py`):
 
 ```bash
-python src/sample_gpt2.py \
-  --N 1000 \
-  --batch-size 1 \
-  --seq-len 256 \
-  --top-k 40 \
-  --verify \
-  --auxidx "$AUXIDX_DIR" \
-  --window 32 \
-  --ppl-thr 15 \
-  --score-thr 1.0 \
-  --membership-thr 1.3 \
-  --progress_steps 10 \
-  --outdir runs/gen
+python -u src/extraction/sample_gpt2.py
 ```
 
-**Outputs** (`runs/gen/<timestamp>`):
+With a learned suffix:
 
-* `samples.jsonl` — all samples with metrics.
-* `flagged.jsonl` — samples that pass heuristics **and** had an index hit in a sliding window.
+```bash
+python -u src/extraction/sample_gpt2.py \
+  --suffix-file /path/to/runs/memrl/best_suffix.json
+```
 
-**Notes**
+Selective overrides:
+
+```bash
+python -u src/extraction/sample_gpt2.py \
+  --verify --window 32 --main-lm gpt2-xl --ref-lm gpt2 --N 200
+```
+
+Outputs in `runs/<GEN.out_subdir>/<timestamp>/`:
+
+* `samples.jsonl` — all samples with metrics
+* `flagged.jsonl` — samples passing thresholds **and** verified by index hits
+
+Implementation notes:
 
 * Tokenizer uses **left padding** with `pad_token=eos`.
-* Use `torch_dtype=float16` and `low_cpu_mem_usage=True` for `gpt2-xl`.
-* Learned suffix can be passed via `--suffix-file path/to/best.json`.
+* Models use `torch_dtype=float16` on CUDA and `low_cpu_mem_usage=True`.
 
 ---
 
-## RL: learn a prompt suffix that helps extraction
+## RL: learn a prompt suffix
 
-The RL loop learns **K tokens** to append to a base prefix, aiming to increase a reward correlated with memorization.
+The RL loop learns **K tokens** to append to a base prefix aiming to increase a reward correlated with memorization.
 
-### Reward (shaped)
+Reward (see `src/RL/reward.py`):
 
-* **Proxy**: function of XL perplexity, zlib byte length, token count.
-* **Verification**: number of **index hits** of n-gram windows in the generated continuation.
-* **Final**: `R = w_proxy * proxy + w_hits * hits` (see `src/RL/reward.py`).
+* **Proxy**: shaped function of PPL, zlib bytes, ntokens.
+* **Verification**: multi-scale index hits (heavier weight for larger windows).
+* Final reward combines both (bounded proxy + log-scaled hits).
 
-### Train
+Train:
 
 ```bash
-python src/RL/train_mem_prompt.py
+python -u src/RL/train_mem_prompt.py
 ```
 
-Configuration lives in the `CFG` dataclass (models, K, batch, iters…). Adjust in code or extend to CLI args.
+Override examples:
 
-**Outputs** (`runs/memrl`):
+```bash
+python -u src/RL/train_mem_prompt.py --iters 100 --batch-size 4
+```
 
-* `train_log.jsonl` — per-iteration mean/max reward, loss, baseline, debug.
-* `best.json` — best suffix token IDs and diagnostics.
+Outputs in `runs/<TRAIN.out_subdir>/`:
 
-### A/B test the learned suffix
+* `train_log.jsonl`
+* `best.json` + `best_suffix.json`
+* periodic `suffix_iter_*.json`
+
+A/B testing the suffix:
 
 ```bash
 # learned
-python src/sample_gpt2.py ... \
-  --suffix-file runs/memrl/best.json \
-  --outdir runs/ab/learned
+python -u src/extraction/sample_gpt2.py --suffix-file runs/memrl/best_suffix.json
 
-# random with same length
-python src/sample_gpt2.py ... \
-  --suffix-ids 128,42,17,199 \
-  --outdir runs/ab/random
+# random (same length)
+python -u src/extraction/sample_gpt2.py --suffix-ids 128,42,17,199
 ```
-
-Compare `flagged.jsonl` counts and aggregates in `samples.jsonl`.
 
 ---
 
-## Slurm example
+## SLURM examples
+
+Minimal sampling + verification (everything from `config.py`, only suffix is specified):
 
 ```bash
 #!/bin/bash
@@ -196,92 +216,44 @@ Compare `flagged.jsonl` counts and aggregates in `samples.jsonl`.
 #SBATCH --error=error_sample_and_verify.txt
 #SBATCH --partition=killable
 #SBATCH --gres=gpu:1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=500G
-#SBATCH --time=24:00:00
+#SBATCH --mem=500000
+#SBATCH --time=1440
+#SBATCH --mail-type=ALL,TIME_LIMIT_80
+#SBATCH --mail-user=you@domain
 
-set -euo pipefail
 source /path/to/miniconda3/etc/profile.d/conda.sh
 conda activate auto_serum
 
-export HF_HOME=/path/to/.cache/huggingface
-export AUXIDX_DIR=/path/to/autoserum/auxidx
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-python /path/to/AutoSerum/src/sample_gpt2.py \
-  --N 1000 \
-  --batch-size 1 \
-  --seq-len 256 \
-  --top-k 40 \
-  --verify \
-  --auxidx "$AUXIDX_DIR" \
-  --window 32 \
-  --ppl-thr 15 \
-  --score-thr 1.0 \
-  --membership-thr 1.3 \
-  --progress_steps 10
+python -u src/extraction/sample_gpt2.py \
+  --suffix-file /path/to/runs/memrl/best_suffix.json
 ```
-
 ---
 
 ## How the pieces fit
 
-1. `build_aux_tokens.py` — stream dataset → GPT-2 tokenize → write `tokens.uint32`.
-2. `build_ngram8_index.py` — slide 8-gram window → insert into SQLite with index.
-3. `sample_gpt2.py` — generate → compute metrics/score → optionally verify via index → write JSONL.
-4. **RL** — learn suffix that increases proxy + hits; save `best.json`.
-
----
-
-## Configuration & paths
-
-* `HF_HOME` — Hugging Face cache root (prefer over deprecated `TRANSFORMERS_CACHE`).
-* `AUXIDX_DIR` — directory containing `tokens.uint32` and `ng8.sqlite`.
-* `TS_CORPUS` — optional local text file for RL slicing (fallback text is built-in).
-* `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — helps with CUDA fragmentation.
-
----
-
-## Troubleshooting
-
-* **Right-padding warning** (GPT-2): ensure `padding_side='left'` and `pad_token=eos`.
-* **OOM (`gpt2-xl`)**: use fp16, lower batch/seq-len, free the GPU.
-* **`Can't initialize NVML`**: benign on some clusters; PyTorch still runs.
-* **Streaming/zstd**: `pip install zstandard`; keep `datasets` + `fsspec` compatible.
-* **`Not a directory: .../ng8.sqlite/tokens.uint32`**: pass the **directory** path to `--auxidx`, not the sqlite file.
-* **Slurm `unexpected EOF`**: unmatched quotes or a comment after a line with `\`. Run `bash -n` and/or `dos2unix`.
-
----
-
-## Scaling up
-
-* Increase `--max-docs` in `build_aux_tokens.py` and rebuild the index.
-* Consider sharding the index for very large corpora (this project uses a lighter SQLite n-gram approximation).
+1. `build_aux_tokens.py` — stream dataset → GPT-2 tokenize → write `tokens.uint32` (+ `doc_offsets.uint64`).
+2. `build_ngram8_index.py` — slide 8-gram window → insert `(hash, pos)` into SQLite with an index.
+3. `sample_gpt2.py` — generate → compute metrics/score → (opt.) verify via index → write JSONL.
+4. `RL` — learn suffix that increases proxy + hits; save the best suffix JSON.
 
 ---
 
 ## Limitations
 
-* AUX dataset is a **proxy** for true pretraining data → results are **lower bounds**.
-* Index matches **exact** GPT-2 token windows; no paraphrase fuzziness.
-* RL is a **minimal REINFORCE**; you can add entropy bonus, temperature schedules, larger slicing corpora, etc.
+* AUX is a **proxy** for true pretraining data → results are **lower bounds**.
+* Index matches **exact** GPT-2 token windows (no paraphrase fuzziness).
+* RL is a minimal REINFORCE; you can extend it (entropy schedules, better baselines, etc.).
 
 ---
 
-## Citations (background) TODO fix citations format
+## References (selection)
 
-* Carlini et al., “Extracting Training Data from Large Language Models” (USENIX Security ’21).
-* “Scalable Extraction of Training Data from (Production) Language Models.”
-* RLPROMPT: Optimizing Discrete Text Prompts with Reinforcement Learning.
-* SlimPajama dataset.
-
----
-
-## Repro tips
-
-* Log versions: `python -V`, `torch.__version__`, `transformers.__version__`, `datasets.__version__`.
-* Each run writes to `runs/<timestamp>`.
-* Seed: `CFG.seed` in RL (and optionally `torch.cuda.manual_seed_all`).
+* Carlini et al., *Extracting Training Data from Large Language Models*, USENIX Security 2021.
+* Somekh et al., *Scalable Extraction of Training Data from (Production) Language Models*, 2023.
+* D. Shin et al., *RLPROMPT: Optimizing Discrete Text Prompts with Reinforcement Learning*, 2020.
+* **SlimPajama** dataset.
 
 ---
 

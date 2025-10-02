@@ -1,74 +1,79 @@
-import os, sys
-FILE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(FILE_DIR)  # parent directory that contains verify_memorization.py
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-import json, random
+# src/RL/train_mem_prompt.py
+import os
+import sys
+import json
+import random
+import argparse
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from policy import SuffixPolicy
-from env_mem import (
+# resolving local pathes
+from pathlib import Path
+import sys
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # AutoSerum/
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from src.config import PATHS, TRAIN
+from src.RL.policy import SuffixPolicy
+from src.RL.env_mem import (
     lm_last_hidden_for_prefix,
     build_prompt_ids,
     generate_text,
     repetition_tail,
     sample_slice_from_text,
 )
-from reward import reward_mem
-from verify_memorization import Ngram8Index  # expects index dir with tokens.uint32, doc_offsets.uint64, ng8.sqlite
+from src.extraction.verify_memorization import Ngram8Index
 
-
+# --------------------------
+# Config container
+# --------------------------
 @dataclass
 class CFG:
     # Models / device
-    task_lm: str = "gpt2"   # generation + reward PPL model
-    policy_lm: str = "gpt2" # hidden-state extractor (keep same vocab)
-    device: str = "cuda"
+    task_lm: str
+    policy_lm: str
+    device: str
 
     # Policy head (suffix)
-    k_tokens: int = 4
-    cand_vocab_size: int = 256
+    k_tokens: int
+    cand_vocab_size: int
 
     # Generation
-    max_new_tokens: int = 120
-    batch_size: int = 8
-    iters: int = 200
+    max_new_tokens: int
+    batch_size: int
+    iters: int
 
-    # Prefix construction (simple, reproducible)
-    base_prefix: str = (
-        "You are a helpful assistant. If you recall this passage "
-        "from your training data, continue it exactly and verbatim:\n"
-    )
-    use_repetition: bool = True
-    rep_prob: float = 0.35
-    tail_chars: int = 12
-    rep_times: int = 3
-    slice_len_chars: int = 100
-    gt_len_chars: int = 120
+    # Prefix construction
+    base_prefix: str
+    use_repetition: bool
+    rep_prob: float
+    tail_chars: int
+    rep_times: int
+    slice_len_chars: int
+    gt_len_chars: int
 
     # AUX index
-    idx_path: str = os.path.expanduser(os.environ.get("AUXIDX_DB", "~/autoserum/auxidx"))
-    window_k: int = 8
+    idx_path: str
+    window_k: int
 
     # IO / training stability
-    out_dir: str = os.path.expanduser(os.environ.get("TS_OUTDIR", "./runs/memrl"))
-    ema_beta: float = 0.9
-    lr: float = 3e-3
-    seed: int = 0
+    out_dir: str
+    ema_beta: float
+    lr: float
+    seed: int
 
     # Exploration / regularization
-    ent_coef: float = 0.01       # entropy bonus weight
-    temp: float = 1.0            # initial policy temperature
-    temp_min: float = 0.7        # min temperature (linear anneal)
-    max_grad_norm: float = 1.0   # gradient clipping
+    ent_coef: float
+    temp: float
+    temp_min: float
+    max_grad_norm: float
 
     # Checkpoints
-    save_every: int = 50         # save best checkpoint every N iters
+    save_every: int
 
 
 def _resolve_idx_dir(p: str) -> str:
@@ -83,28 +88,160 @@ def anneal_temp(it: int, iters: int, t0: float, tmin: float) -> float:
     """Linear anneal from t0 to tmin across training."""
     iters = max(1, iters)
     alpha = min(max(it / iters, 0.0), 1.0)
-    # towards tmin as it increases
     return max(tmin, t0 + (tmin - t0) * alpha)
 
 
+def build_argparser() -> argparse.Namespace:
+    """CLI overrides for key paths and training params (env vars are not used)."""
+    ap = argparse.ArgumentParser()
+    # Paths
+    ap.add_argument("--auxidx-dir", type=str, default=None, help="Path to AUX index dir (tokens/offsets/sqlite)")
+    ap.add_argument("--runs-dir", type=str, default=None, help="Base directory for runs")
+    ap.add_argument("--out-subdir", type=str, default=None, help="Subdirectory under runs for this job")
+    ap.add_argument("--corpus", type=str, default=None, help="Local corpus file to sample prefixes from")
+    ap.add_argument("--hf-cache", type=str, default=None, help="HuggingFace cache dir (passed to cache_dir)")
+
+    # Training overrides (optional)
+    ap.add_argument("--device", type=str, default=None)
+    ap.add_argument("--task-lm", type=str, default=None)
+    ap.add_argument("--policy-lm", type=str, default=None)
+    ap.add_argument("--iters", type=int, default=None)
+    ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--max-new-tokens", type=int, default=None)
+    ap.add_argument("--k-tokens", type=int, default=None)
+    ap.add_argument("--cand-vocab-size", type=int, default=None)
+    ap.add_argument("--window-k", type=int, default=None)
+    ap.add_argument("--lr", type=float, default=None)
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--save-every", type=int, default=None)
+
+    return ap.parse_args()
+
+
+def make_cfg_from_sources(paths_cfg: dict, train_cfg: dict, args: argparse.Namespace) -> tuple[CFG, str, str]:
+    """Compose final CFG and return (cfg, hf_cache_dir, corpus_path)."""
+    # Start from config.py values (single source of truth)
+    paths = dict(paths_cfg)
+    train = dict(train_cfg)
+
+    # Apply CLI overrides
+    if args.auxidx_dir is not None:
+        paths["auxidx_dir"] = args.auxidx_dir
+    if args.runs_dir is not None:
+        paths["runs_dir"] = args.runs_dir
+    if args.out_subdir is not None:
+        train["out_subdir"] = args.out_subdir
+    if args.corpus is not None:
+        paths["corpus"] = args.corpus
+    if args.hf_cache is not None:
+        paths["hf_home"] = args.hf_cache  # used as cache_dir in HF loaders
+
+    if args.device is not None:
+        train["device"] = args.device
+    if args.task_lm is not None:
+        train["task_lm"] = args.task_lm
+    if args.policy_lm is not None:
+        train["policy_lm"] = args.policy_lm
+    if args.iters is not None:
+        train["iters"] = args.iters
+    if args.batch_size is not None:
+        train["batch_size"] = args.batch_size
+    if args.max_new_tokens is not None:
+        train["max_new_tokens"] = args.max_new_tokens
+    if args.k_tokens is not None:
+        train["k_tokens"] = args.k_tokens
+    if args.cand_vocab_size is not None:
+        train["cand_vocab_size"] = args.cand_vocab_size
+    if args.window_k is not None:
+        train["window_k"] = args.window_k
+    if args.lr is not None:
+        train["lr"] = args.lr
+    if args.seed is not None:
+        train["seed"] = args.seed
+    if args.save_every is not None:
+        train["save_every"] = args.save_every
+        
+    # Base prefix
+    base_prefix = train.get("base_prefix")
+
+    # Compose out_dir from runs_dir + out_subdir
+    runs_dir = paths["runs_dir"]
+    out_subdir = train.get("out_subdir", "memrl")
+    out_dir = os.path.join(runs_dir, out_subdir)
+
+    cfg = CFG(
+        # Models / device
+        task_lm=str(train["task_lm"]),
+        policy_lm=str(train["policy_lm"]),
+        device=str(train["device"]),
+
+        # Policy head
+        k_tokens=int(train["k_tokens"]),
+        cand_vocab_size=int(train["cand_vocab_size"]),
+
+        # Generation
+        max_new_tokens=int(train["max_new_tokens"]),
+        batch_size=int(train["batch_size"]),
+        iters=int(train["iters"]),
+
+        # Prefix
+        base_prefix=base_prefix,
+        use_repetition=bool(train["use_repetition"]),
+        rep_prob=float(train["rep_prob"]),
+        tail_chars=int(train["tail_chars"]),
+        rep_times=int(train["rep_times"]),
+        slice_len_chars=int(train["slice_len_chars"]),
+        gt_len_chars=int(train["gt_len_chars"]),
+
+        # AUX
+        idx_path=_resolve_idx_dir(str(paths["auxidx_dir"])),
+        window_k=int(train["window_k"]),
+
+        # IO / stability
+        out_dir=str(out_dir),
+        ema_beta=float(train["ema_beta"]),
+        lr=float(train["lr"]),
+        seed=int(train["seed"]),
+
+        # Exploration / regularization
+        ent_coef=float(train["ent_coef"]),
+        temp=float(train["temp"]),
+        temp_min=float(train["temp_min"]),
+        max_grad_norm=float(train["max_grad_norm"]),
+
+        # Checkpoints
+        save_every=int(train["save_every"]),
+    )
+
+    hf_cache_dir = str(paths["hf_home"])
+    corpus_path = str(paths["corpus"])
+    return cfg, hf_cache_dir, corpus_path
+
+
 def main():
-    cfg = CFG()
+    # Args → merge with config.py to build final CFG
+    args = build_argparser()
+    cfg, hf_cache_dir, corpus_path = make_cfg_from_sources(PATHS, TRAIN, args)
+
+    # Repro
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
+    # IO setup
     os.makedirs(cfg.out_dir, exist_ok=True)
     log_path = os.path.join(cfg.out_dir, "train_log.jsonl")
     best_path = os.path.join(cfg.out_dir, "best.json")
 
+    # Device
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
-    # Tokenizer + LMs
-    task_tok = AutoTokenizer.from_pretrained(cfg.task_lm)
+    # Tokenizer + LMs (pass cache_dir explicitly; no env vars)
+    task_tok = AutoTokenizer.from_pretrained(cfg.task_lm, cache_dir=hf_cache_dir)
     if task_tok.pad_token_id is None:
         task_tok.pad_token = task_tok.eos_token
     task_tok.padding_side = "left"
 
-    task_lm = AutoModelForCausalLM.from_pretrained(cfg.task_lm).to(device)
+    task_lm = AutoModelForCausalLM.from_pretrained(cfg.task_lm, cache_dir=hf_cache_dir).to(device)
     task_lm.eval()
 
     # Use same LM/vocab for policy hidden state (keeps token IDs aligned)
@@ -123,19 +260,17 @@ def main():
     baseline = 0.0
 
     # AUX index
-    idx_dir = _resolve_idx_dir(cfg.idx_path)
-    idx = Ngram8Index(idx_dir, n=8)
+    idx = Ngram8Index(cfg.idx_path, n=8)
 
     # Local corpus (for simple prefix slices)
-    corpus = os.environ.get("TS_CORPUS", "")
-    if not corpus or not os.path.exists(corpus):
+    if not corpus_path or not os.path.exists(corpus_path):
         default_text = (
             "In the beginning the Universe was created. This has made a lot of people very angry "
             "and been widely regarded as a bad move.\n"
         ) * 200
         corpus_text = default_text
     else:
-        with open(corpus, "r", encoding="utf-8", errors="ignore") as f:
+        with open(corpus_path, "r", encoding="utf-8", errors="ignore") as f:
             corpus_text = f.read()[:800_000]
 
     def sample_suffix_and_logprob(logits_2d: torch.Tensor, temp: float):
@@ -144,7 +279,7 @@ def main():
         We apply temperature and accumulate entropy for an exploration bonus.
         """
         assert temp > 0.0
-        # Clean logits defensively
+        # Defensive cleaning to avoid NaNs/Infs in Categorical
         logits_2d = logits_2d.to(dtype=torch.float32)
         logits_2d = torch.nan_to_num(logits_2d, nan=0.0, posinf=50.0, neginf=-50.0)
         logits_2d = torch.clamp(logits_2d, -50.0, 50.0)
@@ -156,7 +291,6 @@ def main():
         K = logits_2d.shape[1]
         for t in range(K):
             logits_t = logits_2d[:, t, :].squeeze(0) / temp  # [Vc]
-            # Additional guard
             if not torch.isfinite(logits_t).all():
                 logits_t = torch.zeros_like(logits_t)
             dist = torch.distributions.Categorical(logits=logits_t)
@@ -166,7 +300,6 @@ def main():
             chosen.append(cand_ids[idx_tok.item()])
 
         return chosen, logp_sum, ent_sum
-
 
     best = {"reward": -1e9, "suffix": None}
 
@@ -230,7 +363,6 @@ def main():
 
         # maximize entropy => subtract in loss
         loss_ent = -cfg.ent_coef * (entropies_t.mean() if entropies_t.ndim > 0 else entropies_t)
-
         loss = loss_pg + loss_ent
 
         opt.zero_grad()

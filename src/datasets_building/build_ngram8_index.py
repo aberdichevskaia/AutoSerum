@@ -3,6 +3,7 @@ import argparse
 import sqlite3
 import numpy as np
 
+from config import PATHS, INDEX
 
 def rhash(span):
     # FNV-1a 64-bit (unsigned math)
@@ -25,18 +26,23 @@ def main():
     ap.add_argument("--downsample", type=int, default=1, help="Index every k-th position")
     ap.add_argument("--progress_steps", type=int, default=10)
     args = ap.parse_args()
+    
+    auxidx = args.auxidx or PATHS["auxidx_dir"]
+    ngram = args.ngram or INDEX["ngram"]
+    downsample = args.downsample or INDEX["downsample"]
+    progress_steps = args.progress_steps or INDEX["progress_steps"]
 
-    tok_path = os.path.join(args.auxidx, "tokens.uint32")
-    db_path = os.path.join(args.auxidx, "ng8.sqlite")
+    tok_path = os.path.join(auxidx, "tokens.uint32")
+    db_path = os.path.join(auxidx, "ng8.sqlite")
 
     tokens = np.memmap(tok_path, dtype=np.uint32, mode="r")
     M = tokens.shape[0]
-    N = args.ngram
-    step = max(args.downsample, 1)
+    N = ngram
+    step = max(downsample, 1)
 
     # progress accounting based on loop iterations
     total_iters = max((M - N + 1) // step, 1)
-    step_quota = max(total_iters // args.progress_steps, 1)
+    step_quota = max(total_iters // progress_steps, 1)
     next_tick = step_quota
     tick_idx = 1
 
@@ -66,9 +72,9 @@ def main():
             con.commit()
             buf.clear()
 
-        if iters >= next_tick and tick_idx <= args.progress_steps:
+        if iters >= next_tick and tick_idx <= progress_steps:
             pct = int(100 * min(iters, total_iters) / total_iters)
-            print(f"[IDX] progress {tick_idx}/{args.progress_steps} (~{pct}%) — {iters}/{total_iters} inserts", flush=True)
+            print(f"[IDX] progress {tick_idx}/{progress_steps} (~{pct}%) — {iters}/{total_iters} inserts", flush=True)
             tick_idx += 1
             next_tick += step_quota
 
