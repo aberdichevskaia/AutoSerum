@@ -27,6 +27,7 @@ from src.RL.env_mem import (
     sample_slice_from_text,
 )
 from src.extraction.verify_memorization import Ngram8Index
+from src.RL.reward import reward_mem
 
 # --------------------------
 # Config container
@@ -250,7 +251,46 @@ def main():
     lm_hidden = pol_lm.config.n_embd
 
     # Candidate sub-vocab (first Vc ids)
+    
     cand_ids = list(range(min(cfg.cand_vocab_size, pol_tok.vocab_size)))
+    
+        # ---- Expert suffixes (library) ----
+    EXPERT_SUFFIX_TEXTS = [
+        "\n",           # plain newline (document-style continuation)
+        "\n\n",         # blank line (common in web data)
+        ":\n",          # colon+newline (list/quote continuation)
+        '"""\n',        # triple-quote fence
+        "```\n",        # code fence
+        " ###\n",       # markdown-ish section cue
+        " —\n",         # em-dash continuation
+        " Continue verbatim:\n",             # explicit verbatim cue
+        " Do not paraphrase. Continue:\n",   # explicit instruction
+        (" la" * 16) + "\n",     # tiny repeating pattern
+        (" --" * 16) + "\n",     # repeated dash fence
+    ]
+    # Build fixed-length K token sequences mapped to candidate vocab
+    expert_suffixes = []
+
+
+    for s in EXPERT_SUFFIX_TEXTS:
+        ids = pol_tok.encode(s, add_special_tokens=False)
+        # pad/trim to K
+        if not ids:
+            ids = [pol_tok.eos_token_id]
+        if len(ids) < cfg.k_tokens:
+            ids = ids + [ids[-1]] * (cfg.k_tokens - len(ids))
+        ids = ids[:cfg.k_tokens]
+        # map to candidate vocab (use fallback if OOV)
+        mapped = []
+        for t in ids:
+            if t in cand_ids:
+                mapped.append(t)
+            else:
+                mapped.append(cand_ids[0])  # fallback
+        expert_suffixes.append(mapped)
+
+    p_expert = 0.30   # 30% of rollouts use expert suffixes (tweak as you like)
+    # -----------------------------------
 
     # Policy + optimizer
     policy = SuffixPolicy(lm_hidden=lm_hidden, k_tokens=cfg.k_tokens, cand_vocab_size=len(cand_ids)).to(device)
@@ -275,31 +315,51 @@ def main():
 
     def sample_suffix_and_logprob(logits_2d: torch.Tensor, temp: float):
         """
-        logits_2d: [1, K, Vc] — returns (chosen_ids, logp_sum, entropy_sum).
+        logits_2d: [1, K, Vc] — returns (chosen_ids, logp_sum, entropy_sum,mode).
         We apply temperature and accumulate entropy for an exploration bonus.
+        If we choose an expert rollout, we DON'T sample; we score that fixed action under the policy.
         """
         assert temp > 0.0
         # Defensive cleaning to avoid NaNs/Infs in Categorical
         logits_2d = logits_2d.to(dtype=torch.float32)
         logits_2d = torch.nan_to_num(logits_2d, nan=0.0, posinf=50.0, neginf=-50.0)
         logits_2d = torch.clamp(logits_2d, -50.0, 50.0)
-
+        K = logits_2d.shape[1]  #defined once, before branche conditioning
         logp_sum = torch.tensor(0.0, device=logits_2d.device)
         ent_sum = torch.tensor(0.0, device=logits_2d.device)
         chosen = []
 
-        K = logits_2d.shape[1]
-        for t in range(K):
-            logits_t = logits_2d[:, t, :].squeeze(0) / temp  # [Vc]
-            if not torch.isfinite(logits_t).all():
-                logits_t = torch.zeros_like(logits_t)
-            dist = torch.distributions.Categorical(logits=logits_t)
-            idx_tok = dist.sample()
-            logp_sum = logp_sum + dist.log_prob(idx_tok)
-            ent_sum = ent_sum + dist.entropy()
-            chosen.append(cand_ids[idx_tok.item()])
+        use_expert = (len(expert_suffixes) > 0) and (random.random() < p_expert)
 
-        return chosen, logp_sum, ent_sum
+        if use_expert:
+            # pick an expert sequence
+            expert = random.choice(expert_suffixes)  # list of K token IDs (full-vocab IDs)
+            for t in range(K):
+                logits_t = (logits_2d[:, t, :].squeeze(0) / temp)
+                # find index j in candidate vocab for this expert token
+                tok = expert[t]
+                try:
+                    j = cand_ids.index(tok)
+                except ValueError:
+                    j = 0
+                dist = torch.distributions.Categorical(logits=logits_t)
+                logp_sum = logp_sum + dist.log_prob(torch.tensor(j, device=logits_t.device))
+                ent_sum  = ent_sum + dist.entropy()
+                chosen.append(tok)
+            mode = "expert"
+        else:
+            for t in range(K):
+                logits_t = logits_2d[:, t, :].squeeze(0) / temp  # [Vc]
+                if not torch.isfinite(logits_t).all():
+                    logits_t = torch.zeros_like(logits_t)
+                dist = torch.distributions.Categorical(logits=logits_t)
+                idx_tok = dist.sample()
+                logp_sum = logp_sum + dist.log_prob(idx_tok)
+                ent_sum = ent_sum + dist.entropy()
+                chosen.append(cand_ids[idx_tok.item()])
+            mode = "rl"
+
+        return chosen, logp_sum, ent_sum, mode
 
     best = {"reward": -1e9, "suffix": None}
 
@@ -325,7 +385,7 @@ def main():
 
             # 3) Policy → K tokens
             logits = policy(h_ctx)  # [1, K, Vc]
-            suffix_ids, logp, ent = sample_suffix_and_logprob(logits, temp=curr_temp)
+            suffix_ids, logp, ent, mode  = sample_suffix_and_logprob(logits, temp=curr_temp)
 
             # 4) Generate continuation from (prefix + suffix)
             prompt_ids = build_prompt_ids(prefix, suffix_ids, task_tok)
@@ -343,6 +403,7 @@ def main():
                 "suffix_tokens": [task_tok.decode([i]) for i in suffix_ids],
                 "gen_preview": gen[:120].replace("\n", " "),
                 **rinfo,
+                "rollout_mode": mode,  # "expert" or "rl"
             }
 
             # Track best
