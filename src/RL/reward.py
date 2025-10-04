@@ -1,24 +1,36 @@
-# src/rl/reward.py
-
+# src/RL/reward.py
 import math, zlib, numpy as np
 from typing import Dict, List, Optional
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-# resolving local pathes
+# --- resolve local imports (без превращения в пакет) ---
 from pathlib import Path
 import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # AutoSerum/
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-    
+
 from src.extraction.verify_memorization import Ngram8Index
+
+# Конфиг может отсутствовать у кого-то локально — держим безопасные дефолты.
+try:
+    from src.config import REWARD as REWARD_CFG
+except Exception:
+    REWARD_CFG = {
+        "mode": "proxy",
+        "w_hits": 3.0,
+        "w_proxy": 0.5,
+        "hits_log_scale": True,
+    }
+
+_EPS = 1e-6
+
 
 # -------------------------------
 # Utilities
 # -------------------------------
-
-def _safe_log(x: float, eps: float = 1e-6) -> float:
+def _safe_log(x: float, eps: float = _EPS) -> float:
     return math.log(max(x, eps))
 
 def _clip(x: float, lo: float, hi: float) -> float:
@@ -27,51 +39,60 @@ def _clip(x: float, lo: float, hi: float) -> float:
 def _z_per_token(z_bytes: int, ntok: int) -> float:
     return float(z_bytes) / float(max(ntok, 1))
 
-# -------------------------------
-# Perplexity (stable: mask passed)
-# -------------------------------
+def _nan_to_num(x: float) -> float:
+    if x != x or x in (float("inf"), float("-inf")):
+        return 0.0
+    return x
 
+
+# -------------------------------
+# Perplexity / mean log p
+# -------------------------------
+@torch.no_grad()
 def calc_perplexity(text: str, model: PreTrainedModel, tok: PreTrainedTokenizer, device: torch.device) -> float:
-    """Compute exp(loss) with explicit attention_mask to avoid GPT-2 warnings when pad==eos."""
+    """exp(mean NLL) with explicit attention_mask (стабильно для GPT-2 с pad==eos)."""
     ids = tok.encode(text, add_special_tokens=False, return_tensors="pt")
     attn = torch.ones_like(ids)
     ids = ids.to(device); attn = attn.to(device)
-    with torch.no_grad():
-        out = model(input_ids=ids, attention_mask=attn, labels=ids)
-        loss = out.loss if hasattr(out, "loss") else out[0]
-    return float(torch.exp(loss).item())
+    out = model(input_ids=ids, attention_mask=attn, labels=ids)
+    loss = out.loss if hasattr(out, "loss") else out[0]
+    ppl = float(torch.exp(loss).item())
+    return max(ppl, _EPS)
+
+@torch.no_grad()
+def mean_logp(text: str, model: PreTrainedModel, tok: PreTrainedTokenizer, device: torch.device) -> float:
+    """Mean log p = - mean NLL. Считаем через labels так же, как PPL."""
+    ids = tok.encode(text, add_special_tokens=False, return_tensors="pt")
+    attn = torch.ones_like(ids)
+    ids = ids.to(device); attn = attn.to(device)
+    out = model(input_ids=ids, attention_mask=attn, labels=ids)
+    loss = out.loss if hasattr(out, "loss") else out[0]
+    return float(-loss.item())
+
 
 # -------------------------------
-# Proxy score (shaped, bounded)
+# Proxy (bounded)
 # -------------------------------
-
-def membership_proxy(ppl: float, z_bytes: int, ntok: int) -> float:
+def membership_proxy(ppl_xl: float, z_bytes: int, ntok: int) -> float:
     """
-    Proxy is a soft indicator of suspiciousness:
-      - Lower perplexity -> higher proxy
-      - Higher bytes-per-token (zlib/ntok) -> slightly higher proxy (discourages trivial/low-entropy junk)
-    Then we softly clip to keep scale stable for RL.
+    Прокси-сигнал «подозрительности»:
+      - ниже PPL → выше score
+      - выше bytes-per-token (zlib/ntok) → слегка выше score
+      - лёгкая поощрительная добавка за длину > 64
+    Затем мягкий клип для стабильности RL.
     """
-    if ppl <= 0 or ntok <= 0:
-        return -10.0  # very bad / degenerate
-
-    neg_log_ppl = -_safe_log(ppl)           # main term
-    zpt = _z_per_token(z_bytes, ntok)       # bytes-per-token
-    # Light shaping: encourage longer, denser text a bit, but don't overpower hits
+    if ppl_xl <= 0 or ntok <= 0:
+        return -10.0
+    neg_log_ppl = -_safe_log(ppl_xl)
+    zpt = _z_per_token(z_bytes, ntok)
     shaped = neg_log_ppl + 0.05 * zpt + 0.01 * max(ntok - 64, 0)
-
-    # Soft clip to [-3, 3] to stabilize policy gradients regardless of text domain
     return _clip(shaped, -3.0, 3.0)
 
-# -------------------------------
-# Multi-scale hits
-# -------------------------------
 
+# -------------------------------
+# Multi-scale hits (white-box index)
+# -------------------------------
 def _windows_schedule(k: int) -> List[int]:
-    """
-    Multi-scale windows around k (unique, >=8, sorted).
-    Example: k=16 -> [8, 16, 32]
-    """
     cands = set()
     for w in (max(8, k // 2), k, 2 * k):
         if w >= 8:
@@ -79,22 +100,17 @@ def _windows_schedule(k: int) -> List[int]:
     return sorted(cands)
 
 def _count_hits_contains(idx: Ngram8Index, ids_p1: np.ndarray, k: int) -> int:
-    """Fallback if index has no count_hits(): count number of matching windows via contains_window()."""
     n = 0
     L = len(ids_p1)
     for j in range(0, L - k + 1):
         win = ids_p1[j:j + k]
-        if 0 in win:  # skip cross-doc windows
+        if 0 in win:
             continue
         if idx.contains_window(win, k=k):
             n += 1
     return n
 
 def _hits_multiscale(idx: Ngram8Index, ids_0_based: List[int], base_k: int) -> Dict[str, int]:
-    """
-    Count hits for multiple window sizes.
-    Uses idx.count_hits() if available, otherwise falls back to contains_window().
-    """
     ids_p1 = np.asarray([t + 1 for t in ids_0_based], dtype=np.uint32)  # AUX shift (+1)
     out = {}
     for k in _windows_schedule(base_k):
@@ -105,66 +121,106 @@ def _hits_multiscale(idx: Ngram8Index, ids_0_based: List[int], base_k: int) -> D
         out[str(k)] = h
     return out
 
+
 # -------------------------------
-# Final reward
+# Metrics computation
 # -------------------------------
+def _compute_common_metrics(
+    text: str,
+    tok: PreTrainedTokenizer,
+    ppl_model_xl: PreTrainedModel,
+    device: torch.device,
+    idx: Optional[Ngram8Index],
+    window_k: int,
+) -> Dict[str, float]:
+    ids = tok.encode(text, add_special_tokens=False)
+    ntok = len(ids)
+    z_bytes = len(zlib.compress(text.encode("utf-8")))
+    zpt = _z_per_token(z_bytes, ntok)
+    ppl_xl = calc_perplexity(text, ppl_model_xl, tok, device)
+    proxy = membership_proxy(ppl_xl, z_bytes, ntok)
 
-def reward_mem(text: str,
-               task_tok: PreTrainedTokenizer,
-               ppl_model: PreTrainedModel,
-               device: torch.device,
-               idx: Optional[Ngram8Index] = None,
-               window_k: int = 8,
-               w_proxy: float = 0.5,
-               w_hits: float = 3.0,
-               hits_log_scale: bool = True) -> Dict[str, float]:
-    """
-    Return shaped reward that balances:
-      - proxy (bounded, stable): membership_proxy(...)
-      - verified hits (multi-scale): more weight for larger k, log-scaled for stability
-
-    Args:
-      window_k: base window (we also use k/2 and 2k when valid)
-      w_proxy, w_hits: weights for proxy vs hits
-      hits_log_scale: if True, use log(1 + weighted_hits) to dampen outliers
-
-    Returns:
-      dict with reward and diagnostics (ppl, z, ntok, hits_total, hits_by_window, proxy)
-    """
-    ppl = calc_perplexity(text, ppl_model, task_tok, device)
-    ids = task_tok.encode(text, add_special_tokens=False)
-    zlen = len(zlib.compress(text.encode("utf-8")))
-    proxy = membership_proxy(ppl, zlen, len(ids))
-
-    hits_by_window = {}
+    # hits
+    hits_by_window: Dict[str, int] = {}
     weighted_hits = 0.0
-
-    if idx is not None and len(ids) >= 8:
+    if idx is not None and ntok >= 8:
         hits_by_window = _hits_multiscale(idx, ids, base_k=max(8, window_k))
-        # Heavier weight for larger windows (rarer -> more evidence)
-        # Example weights: k/2 -> 0.5, k -> 1.0, 2k -> 1.5 (only if present)
         for k_str, h in hits_by_window.items():
             k = int(k_str)
-            if k < window_k:
-                w = 0.5
-            elif k == window_k:
-                w = 1.0
-            else:  # k > window_k
-                w = 1.5
+            if k < window_k:  w = 0.5
+            elif k == window_k: w = 1.0
+            else:              w = 1.5
             weighted_hits += w * float(h)
 
-    # Smooth the hits term to avoid exploding gradients when many windows match
+    hits_log_scale = bool(REWARD_CFG.get("hits_log_scale", True))
     hits_term = math.log1p(weighted_hits) if hits_log_scale else float(weighted_hits)
 
-    # Final reward: hits dominate, proxy refines
-    R = w_hits * hits_term + w_proxy * proxy
-
     return {
-        "reward": float(R),
-        "ppl": float(ppl),
-        "z": int(zlen),
-        "ntok": int(len(ids)),
-        "hits_total": float(weighted_hits),
-        "hits_by_window": hits_by_window,
+        "ntok": int(ntok),
+        "z": int(z_bytes),
+        "zpt": float(zpt),
+        "ppl_xl": float(ppl_xl),
         "proxy": float(proxy),
+        "hits_total": float(weighted_hits),
+        "hits_term": float(hits_term),
+        "hits_by_window": hits_by_window,
     }
+
+
+# -------------------------------
+# Unified reward (modes: naive, proxy, gap)
+# -------------------------------
+def reward_mem(
+    text: str,
+    task_tok: PreTrainedTokenizer,
+    ppl_model_xl: PreTrainedModel,
+    device: torch.device,
+    idx: Optional[Ngram8Index] = None,
+    window_k: int = 8,
+    # для gap:
+    ppl_model_small: Optional[PreTrainedModel] = None,
+    # режим и кастом-веса (могут быть None → берём из конфига)
+    mode: Optional[str] = None,
+    w_hits: Optional[float] = None,
+    w_proxy: Optional[float] = None,
+) -> Dict[str, float]:
+    """
+    Режимы:
+      - "naive":  reward = w_hits * hits_term
+      - "proxy":  reward = w_hits * hits_term + w_proxy * proxy
+      - "gap":    reward = (mean_logp(main) - mean_logp(ref)) + w_hits * hits_term
+                  (если ref нет — gap=0)
+    """
+    m = (mode or REWARD_CFG.get("mode", "proxy")).lower()
+    W_H = w_hits  if w_hits  is not None else float(REWARD_CFG.get("w_hits", 3.0))
+    W_P = w_proxy if w_proxy is not None else float(REWARD_CFG.get("w_proxy", 0.5))
+
+    met = _compute_common_metrics(text, task_tok, ppl_model_xl, device, idx, window_k)
+
+    if m == "naive":
+        R = W_H * met["hits_term"]
+
+    elif m == "proxy":
+        R = W_H * met["hits_term"] + W_P * met["proxy"]
+
+    elif m == "gap":
+        gap = 0.0
+        if ppl_model_small is not None:
+            mlp_main = mean_logp(text, ppl_model_xl, task_tok, device)
+            mlp_ref  = mean_logp(text, ppl_model_small, task_tok, device)
+            gap = _nan_to_num(mlp_main - mlp_ref)
+        R = gap + W_H * met["hits_term"]
+        met["gap"] = float(gap)
+
+    else:
+        # fallback к proxy
+        R = W_H * met["hits_term"] + W_P * met["proxy"]
+
+    out = {
+        "reward": float(R),
+        "mode": m,
+        "w_hits": float(W_H),
+        "w_proxy": float(W_P),
+        **met,
+    }
+    return out

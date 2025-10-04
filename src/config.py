@@ -21,6 +21,21 @@ INDEX = {
     "progress_steps": 10,
 }
 
+# --- Reward defaults ---
+REWARD = {
+    # one of: "naive", "proxy", "full"
+    "mode": "proxy",
+
+    # weights (используются по мере надобности в выбранном режиме)
+    "w_hits": 3.0,
+    "w_proxy": 0.5,
+    "w_ratio_small_big": 0.5,   # log(PPL_small) / log(PPL_xl)
+    "w_ratio_lower_big": 0.5,   # log(PPL_lower) / log(PPL_xl)
+    "w_z_over_logppl": 0.25,    # (zlib/ntok) / log(PPL_xl)
+
+    "hits_log_scale": True,     # log1p(weighted_hits)
+}
+
 # --- Train defaults ---
 TRAIN = {
     "device": "cuda",
