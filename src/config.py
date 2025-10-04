@@ -23,23 +23,18 @@ INDEX = {
 
 # --- Reward defaults ---
 REWARD = {
-    # one of: "naive", "proxy", "full"
+    # one of: "naive", "proxy", "gap"
     "mode": "proxy",
 
-    # weights (используются по мере надобности в выбранном режиме)
     "w_hits": 3.0,
     "w_proxy": 0.5,
-    "w_ratio_small_big": 0.5,   # log(PPL_small) / log(PPL_xl)
-    "w_ratio_lower_big": 0.5,   # log(PPL_lower) / log(PPL_xl)
-    "w_z_over_logppl": 0.25,    # (zlib/ntok) / log(PPL_xl)
-
-    "hits_log_scale": True,     # log1p(weighted_hits)
+    "hits_log_scale": True,  
 }
 
 # --- Train defaults ---
 TRAIN = {
     "device": "cuda",
-    "task_lm": "gpt2",
+    "task_lm": "gpt2-xl",
     "policy_lm": "gpt2",
     "ref_lm": "gpt2",  
     "k_tokens": 4,

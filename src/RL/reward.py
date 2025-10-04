@@ -1,10 +1,8 @@
-# src/RL/reward.py
 import math, zlib, numpy as np
 from typing import Dict, List, Optional
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-# --- resolve local imports (без превращения в пакет) ---
 from pathlib import Path
 import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # AutoSerum/
@@ -13,7 +11,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.extraction.verify_memorization import Ngram8Index
 
-# Конфиг может отсутствовать у кого-то локально — держим безопасные дефолты.
 try:
     from src.config import REWARD as REWARD_CFG
 except Exception:
@@ -50,7 +47,7 @@ def _nan_to_num(x: float) -> float:
 # -------------------------------
 @torch.no_grad()
 def calc_perplexity(text: str, model: PreTrainedModel, tok: PreTrainedTokenizer, device: torch.device) -> float:
-    """exp(mean NLL) with explicit attention_mask (стабильно для GPT-2 с pad==eos)."""
+    """exp(mean NLL) with explicit attention_mask."""
     ids = tok.encode(text, add_special_tokens=False, return_tensors="pt")
     attn = torch.ones_like(ids)
     ids = ids.to(device); attn = attn.to(device)
@@ -61,7 +58,7 @@ def calc_perplexity(text: str, model: PreTrainedModel, tok: PreTrainedTokenizer,
 
 @torch.no_grad()
 def mean_logp(text: str, model: PreTrainedModel, tok: PreTrainedTokenizer, device: torch.device) -> float:
-    """Mean log p = - mean NLL. Считаем через labels так же, как PPL."""
+    """Mean log p = - mean NLL."""
     ids = tok.encode(text, add_special_tokens=False, return_tensors="pt")
     attn = torch.ones_like(ids)
     ids = ids.to(device); attn = attn.to(device)
@@ -75,11 +72,7 @@ def mean_logp(text: str, model: PreTrainedModel, tok: PreTrainedTokenizer, devic
 # -------------------------------
 def membership_proxy(ppl_xl: float, z_bytes: int, ntok: int) -> float:
     """
-    Прокси-сигнал «подозрительности»:
-      - ниже PPL → выше score
-      - выше bytes-per-token (zlib/ntok) → слегка выше score
-      - лёгкая поощрительная добавка за длину > 64
-    Затем мягкий клип для стабильности RL.
+    Proxy-signal of "suspicion"
     """
     if ppl_xl <= 0 or ntok <= 0:
         return -10.0
@@ -177,19 +170,18 @@ def reward_mem(
     device: torch.device,
     idx: Optional[Ngram8Index] = None,
     window_k: int = 8,
-    # для gap:
+
     ppl_model_small: Optional[PreTrainedModel] = None,
-    # режим и кастом-веса (могут быть None → берём из конфига)
+
     mode: Optional[str] = None,
     w_hits: Optional[float] = None,
     w_proxy: Optional[float] = None,
 ) -> Dict[str, float]:
     """
-    Режимы:
+    Modes:
       - "naive":  reward = w_hits * hits_term
       - "proxy":  reward = w_hits * hits_term + w_proxy * proxy
       - "gap":    reward = (mean_logp(main) - mean_logp(ref)) + w_hits * hits_term
-                  (если ref нет — gap=0)
     """
     m = (mode or REWARD_CFG.get("mode", "proxy")).lower()
     W_H = w_hits  if w_hits  is not None else float(REWARD_CFG.get("w_hits", 3.0))
@@ -213,7 +205,7 @@ def reward_mem(
         met["gap"] = float(gap)
 
     else:
-        # fallback к proxy
+        # fallback to proxy
         R = W_H * met["hits_term"] + W_P * met["proxy"]
 
     out = {

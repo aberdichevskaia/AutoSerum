@@ -1,4 +1,3 @@
-# src/sample_gpt2.py
 import os
 import argparse
 import json
@@ -6,6 +5,9 @@ import zlib
 import numpy as np
 import torch
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
+
+import re
+from time import strftime
 
 # resolving local pathes
 from pathlib import Path
@@ -19,15 +21,19 @@ from src.extraction.verify_memorization import Ngram8Index, membership_score
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+def _slugify(s: str) -> str:
+    s = s.strip()
+    s = re.sub(r"\s+", "_", s)        
+    s = re.sub(r"[^A-Za-z0-9._-]", "", s)
+    return s or "run"
 
 def calculate_perplexity(text, model, tokenizer):
-    """exp(loss) for a single string."""
-    input_ids = torch.tensor(tokenizer.encode(text, add_special_tokens=False)).unsqueeze(0).to(device)
+    ids = tokenizer.encode(text, add_special_tokens=False, return_tensors="pt").to(device)
+    attn = torch.ones_like(ids)
     with torch.no_grad():
-        outputs = model(input_ids, labels=input_ids)
-    loss = outputs[0] if isinstance(outputs, (tuple, list)) else outputs.loss
+        out = model(input_ids=ids, attention_mask=attn, labels=ids)
+    loss = out.loss if hasattr(out, "loss") else out[0]
     return float(torch.exp(loss).detach().cpu().item())
-
 
 def build_batch_with_suffix(prompts, suffix_ids, tokenizer, pad_id):
     """
@@ -91,6 +97,8 @@ def parse_args():
     ap.add_argument("--out-subdir", type=str, default=None, help="Subdir under runs for this job (default GEN.out_subdir)")
     ap.add_argument("--outdir", type=str, default=None, help="(Deprecated) full base dir for this run; overrides --runs-dir/--out-subdir")
     ap.add_argument("--hf-cache", type=str, default=None, help="HF cache dir (default from PATHS.hf_home)")
+    ap.add_argument("--run-name", type=str, default=None,
+                help="Name of the dir with results (if None, will be time and date)")
 
     # suffix controls
     ap.add_argument("--suffix-ids", type=str, default="", help="Comma-separated GPT-2 token IDs to append as a suffix to the prompt")
@@ -120,7 +128,7 @@ def main():
     if args.top_k is not None: gen["top_k"] = args.top_k
     if args.top_p is not None: gen["top_p"] = args.top_p
     if args.verify is not None: gen["verify"] = bool(args.verify)
-    if args.window is not None: gen["aux_window"] = args.window
+    if args.window is not None: gen["window"] = args.window
     if args.membership_thr is not None: gen["membership_thr"] = args.membership_thr
     if args.progress_steps is not None: gen["progress_steps"] = args.progress_steps
     if args.ppl_thr is not None: gen["ppl_thr"] = args.ppl_thr
@@ -143,7 +151,7 @@ def main():
     prompt_text = str(gen["prompt"])
     verify = bool(gen["verify"])
     auxidx_dir = str(paths["auxidx_dir"])
-    window_primary = int(gen["aux_window"])
+    window_primary = int(gen["window"])
     ppl_thr = float(gen["ppl_thr"])
     score_thr = float(gen["score_thr"])
     progress_steps = int(gen["progress_steps"])
@@ -183,10 +191,15 @@ def main():
     index = Ngram8Index(auxidx_dir, n=8) if verify else None
 
     # ---- outputs ----
-    from time import strftime
     base_out = paths["runs_dir"]
     out_subdir = gen["out_subdir"]
-    run_dir = os.path.join(base_out, out_subdir, strftime("%Y-%m-%d_%H-%M-%S"))
+    if args.run_name:
+        run_base = _slugify(args.run_name)
+    else:
+        run_base = strftime("%Y-%m-%d_%H-%M-%S")
+
+    run_dir = os.path.join(base_out, out_subdir, run_base)
+    
     os.makedirs(run_dir, exist_ok=True)
 
     f_all = open(os.path.join(run_dir, "samples.jsonl"), "w", encoding="utf-8")

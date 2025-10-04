@@ -1,7 +1,6 @@
 import os
 import sqlite3
 import numpy as np
-import zlib
 from transformers import GPT2TokenizerFast
 
 

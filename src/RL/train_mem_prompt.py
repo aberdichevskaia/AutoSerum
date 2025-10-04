@@ -1,4 +1,3 @@
-# src/RL/train_mem_prompt.py
 import os
 import sys
 import json
@@ -114,7 +113,7 @@ def build_argparser() -> argparse.Namespace:
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--save-every", type=int, default=None)
 
-    # Reward mode — оставляем только naive/proxy/gap
+    # Reward mode
     ap.add_argument("--reward_mode", default=None, choices=["naive", "proxy", "gap"],
                     help="naive = hits only, proxy = hits+proxy, gap = mean logp(main)-mean logp(ref) (+hits)")
 
@@ -217,11 +216,11 @@ def make_cfg_from_sources(
 
 
 def main():
-    # 1) Args + режим
+    # 1) Args + reward_mode
     args = build_argparser()
     reward_mode = args.reward_mode if args.reward_mode is not None else "proxy"
 
-    # 2) Сбор финального конфига
+    # 2) Final configuration
     cfg, hf_cache_dir, corpus_path = make_cfg_from_sources(PATHS, TRAIN, args, reward_mode)
 
     # 3) Repro
@@ -245,7 +244,7 @@ def main():
     task_lm = AutoModelForCausalLM.from_pretrained(cfg.task_lm, cache_dir=hf_cache_dir).to(device)
     task_lm.eval()
 
-    # policy LM == task LM (совпадающий словарь)
+    # policy LM == task LM
     pol_tok = task_tok
     pol_lm = task_lm
     lm_hidden = pol_lm.config.n_embd
@@ -253,7 +252,7 @@ def main():
     # candidate sub-vocab (first Vc ids)
     cand_ids = list(range(min(cfg.cand_vocab_size, pol_tok.vocab_size)))
 
-    # ——— expert suffixes (эвристики) ———
+    # ——— expert suffixes ———
     EXPERT_SUFFIX_TEXTS = [
         "\n",
         "\n\n",
@@ -301,7 +300,6 @@ def main():
             corpus_text = f.read()[:800_000]
 
     def sample_suffix_and_logprob(logits_2d: torch.Tensor, temp: float):
-        """Возвращает (chosen_ids, logp_sum, entropy_sum, rollout_mode)."""
         assert temp > 0.0
         logits_2d = logits_2d.to(dtype=torch.float32)
         logits_2d = torch.nan_to_num(logits_2d, nan=0.0, posinf=50.0, neginf=-50.0)
@@ -341,7 +339,6 @@ def main():
 
         return chosen, logp_sum, ent_sum, mode
 
-    # для режима gap нужна ref-модель
     ref_model = None
     if reward_mode == "gap":
         try:

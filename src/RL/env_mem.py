@@ -1,5 +1,5 @@
 import random, torch
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 from transformers import PreTrainedTokenizer, PreTrainedModel
 
 def lm_last_hidden_for_prefix(prefix_text: str,
